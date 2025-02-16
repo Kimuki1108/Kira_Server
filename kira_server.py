@@ -1,74 +1,78 @@
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
-import pyttsx3
-import webbrowser
-import datetime
-import random
+import os
+import speech_recognition as sr
+import numpy as np
+import librosa
+import pickle
+import soundfile as sf
+from gtts import gTTS
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-engine = pyttsx3.init()
+# Ovoz namunalari uchun model yuklash (agar mavjud bo‘lsa)
+model_path = "voice_model.pkl"
+if os.path.exists(model_path):
+    with open(model_path, "rb") as f:
+        voice_model = pickle.load(f)
+else:
+    voice_model = None
+
+
+def extract_features(file_path):
+    y, sr = librosa.load(file_path, sr=22050)
+    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    return np.mean(mfccs, axis=1)
+
+
+def verify_voice(file_path):
+    if voice_model is None:
+        return False
+    features = extract_features(file_path)
+    return voice_model.predict([features])[0] == 1
+
 
 def speak(text):
-    engine.say(text)
-    engine.runAndWait()
+    tts = gTTS(text=text, lang="uz")
+    tts.save("output.mp3")
+    os.system("mpg321 output.mp3")  # Serverda ovoz chiqmaydi
 
-jokes = [
-    "Nega kompyuter shifoxonaga tushdi? Chunki virus yuqtirib qoldi!",
-    "Hacker kimgadir telefon qilibdi: 'Parolni ayting, yoki o'zim topib olaman!'",
-    "Ertaga hamma narsa yaxshi bo'ladi, lekin bugun ham shunchaki zavqlaning!"
-]
 
-motivations = [
-    "Hech qachon taslim bo‘lmang! Eng zo‘r yutuqlarga yo‘l davomida duch kelasiz.",
-    "Bugun bir qadam tashla, ertaga ikki qadam! Sen muvaffaqiyatga erishasan!",
-    "Siz har doim eng yaxshi natijalarga loyiqsiz!"
-]
+@app.route("/api", methods=["POST"])
+def api():
+    data = request.json
+    if "text" not in data:
+        return jsonify({"error": "No text provided"}), 400
+    response = f"Sizning so‘rovingiz qabul qilindi: {data['text']}"
+    return jsonify({"response": response})
 
-@app.route('/')
-def home():
-    return "Kira AI Server ishlayapti!"
 
-@socketio.on('message')
-def handle_message(message):
-    command = message.lower()
-    response = ""
-
-    if "youtube" in command:
-        webbrowser.open("https://youtube.com")
-        response = "YouTube ochildi"
-    elif "google" in command:
-        webbrowser.open("https://google.com")
-        response = "Google ochildi"
-    elif "kawaii.uz" in command:
-        webbrowser.open("https://kawaii.uz")
-        response = "Kawaii.uz ochildi"
-    elif "vaqt nechchi" in command:
-        now = datetime.datetime.now()
-        response = f"Hozirgi vaqt {now.strftime('%H:%M')}"
-    elif "sana nechchi" in command:
-        now = datetime.datetime.now()
-        response = f"Bugungi sana {now.strftime('%Y-%m-%d')}"
-    elif "men xafaman" in command:
-        response = random.choice(jokes + motivations)
-    elif "dunyoda kim eng zo'ri" in command:
-        response = "Kuragami Kyotaka"
-    elif "sen kimga bo'ysinasan" in command:
-        response = "Faqat sizga"
-    elif "youtube ga video qo'ymoqchiman" in command:
-        webbrowser.open("https://studio.youtube.com")
-        response = "YouTube Studio ochildi"
-    elif "youtube ga post" in command:
-        webbrowser.open("https://www.youtube.com/channel/UC/community")
-        response = "YouTube Community ochildi"
-    elif "hayr" in command or "chiqish" in command:
-        response = "Xayr, siz bilan ishlash maroqli bo'ldi!"
-    else:
-        response = "Kechirasiz, bu buyruqni tushunmadim."
+@socketio.on("voice_command")
+def handle_voice(data):
+    audio_data = data.get("audio")
+    if not audio_data:
+        emit("response", {"error": "No audio received"})
+        return
     
-    speak(response)
-    emit('response', response)
+    with open("temp.wav", "wb") as f:
+        f.write(audio_data)
+    
+    if verify_voice("temp.wav"):
+        recognizer = sr.Recognizer()
+        with sr.AudioFile("temp.wav") as source:
+            audio = recognizer.record(source)
+        try:
+            text = recognizer.recognize_google(audio, language="uz-UZ")
+            emit("response", {"text": text})
+        except sr.UnknownValueError:
+            emit("response", {"error": "Tushunarsiz ovoz"})
+        except sr.RequestError:
+            emit("response", {"error": "Ovoz tanish xizmati ishlamayapti"})
+    else:
+        emit("response", {"error": "Noto‘g‘ri foydalanuvchi ovozi"})
 
-if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host="0.0.0.0", port=port, debug=True)
