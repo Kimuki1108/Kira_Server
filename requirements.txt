@@ -3,4 +3,3 @@ flask_socketio
 eventlet 
 pyttsx3 
 gTTS
-mpg321
